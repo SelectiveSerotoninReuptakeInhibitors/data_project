@@ -3,198 +3,112 @@ import pandas as pd
 import plotly.express as px
 import re
 import numpy as np
+import requests
 
+st.set_page_config(page_title="서울 지하철 API 대시보드", layout="wide")
 st.title("⏰ 서울 지하철 시간대별 이용 분석 대시보드")
 
-# 1. 파일 업로드
-uploaded_file = st.file_uploader("서울시 지하철 시간대별 승차 CSV 업로드", type="csv")
+# --- 1. API 설정 및 데이터 로드 ---
+# 본인의 API 인증키를 입력하세요
+API_KEY = "인증키번호" 
 
-if uploaded_file is not None:
-    # 2. CSV 로드
-    df = pd.read_csv(uploaded_file, encoding="cp949", low_memory=False)
+st.sidebar.header("📡 데이터 소스 설정")
+data_source = st.sidebar.radio("데이터 불러오기 방식", ["API 실시간 로드", "CSV 파일 업로드"])
 
-    st.subheader("📊 원본 데이터 미리보기")
-    st.dataframe(df.head(3))
-    st.write("컬럼:", list(df.columns))
+df = None
 
-    # 3. 호선 컬럼, 시간대 컬럼 자동 탐지
-    line_col = next((col for col in df.columns if "호선" in str(col)), None)
-    time_cols = [col for col in df.columns if re.search(r"\d{2}시-\d{2}시", str(col))]
-
-    if (line_col is None) or len(time_cols) == 0:
-        st.error("❌ '호선' 또는 '00시-01시' 형식의 시간대 컬럼을 찾을 수 없습니다.")
-    else:
-        st.info(f"감지된 시간대 컬럼 수: {len(time_cols)}개")
-
-        # 4. 전처리 / 정규화 옵션 (사이드바)
-        st.sidebar.header("🧹 전처리 옵션")
-
-        na_method = st.sidebar.selectbox(
-            "결측치 처리 방식",
-            ["0으로 채우기", "해당 시간대 평균으로 채우기"],
-            index=0,
-        )
-
-        outlier_method = st.sidebar.selectbox(
-            "이상치 처리 방식",
-            ["처리하지 않음", "IQR 기반 클리핑"],
-            index=1,
-        )
-
-        normalize_flag = st.sidebar.checkbox(
-            "시간대 값 정규화 (0~1 범위로 변환)", value=False
-        )
-
-        # 5. 결측치 처리
-        work_df = df.copy()
-
-        if na_method == "0으로 채우기":
-            work_df[time_cols] = work_df[time_cols].fillna(0)
-        else:  # 평균으로 채우기
-            work_df[time_cols] = work_df[time_cols].apply(
-                lambda s: s.fillna(s.mean())
-            )
-
-        # 6. 이상치 처리 (IQR 클리핑)
-        if outlier_method == "IQR 기반 클리핑":
-            Q1 = work_df[time_cols].quantile(0.25)
-            Q3 = work_df[time_cols].quantile(0.75)
-            IQR = Q3 - Q1
-
-            lower = Q1 - 1.5 * IQR
-            upper = Q3 + 1.5 * IQR
-
-            for col in time_cols:
-                work_df[col] = work_df[col].clip(lower[col], upper[col])
-
-        # 7. 정규화 (0~1 Min-Max)
-        #   - 각 시간대 컬럼에서 최소값 → 0, 최대값 → 1
-        if normalize_flag:
-            st.sidebar.markdown("✔ Min-Max 정규화 적용됨 (0~1)")
-            min_vals = work_df[time_cols].min()
-            max_vals = work_df[time_cols].max()
-            # 0으로 나누는 것 방지용 eps
-            eps = 1e-9
-            work_df[time_cols] = (work_df[time_cols] - min_vals) / (max_vals - min_vals + eps)
-        else:
-            st.sidebar.markdown("정규화 미적용 (원래 승차 인원 기준)")
-
-        st.subheader("🧾 전처리·정규화 후 데이터 예시 (시간대 컬럼만)")
-        st.dataframe(work_df[time_cols].head(3).round(3))
-
-        # 8. 호선 선택
-        st.sidebar.header("🚇 호선 선택")
-        lines = sorted(work_df[line_col].dropna().unique().tolist())
-        selected_line = st.sidebar.selectbox("호선", lines)
-
-        # 선택된 호선만 필터
-        line_df = work_df[work_df[line_col] == selected_line]
-
-        # 9. 시간대별 평균 값 계산
-        avg_time_data = line_df[time_cols].mean()
-
-        hourly_data = []
-        for col in time_cols:
-            # "04시-05시 승차인원" → 4
-            hour_match = re.search(r"(\d{2})시", col)
-            if hour_match:
-                hour = int(hour_match.group(1))
-                hourly_data.append({"시간": hour, "값": avg_time_data[col]})
-
-        hourly_df = pd.DataFrame(hourly_data).sort_values("시간")
-
-        # y축 라벨: 정규화 여부에 따라 변경
-        y_label = "정규화된 값 (0~1)" if normalize_flag else "평균 승차인원"
-
-        # 10. 24시간 선 그래프 (시간대 분석)
-        st.subheader(f"📈 {selected_line} 시간대별 이용 패턴")
-
-        fig_line = px.line(
-            hourly_df,
-            x="시간",
-            y="값",
-            title=f"{selected_line} 시간대별 {'정규화된' if normalize_flag else '평균'} 값",
-            markers=True,
-            line_shape="linear",
-        )
-
-        fig_line.update_traces(
-            line=dict(color="#FF6B6B", width=3),
-            marker=dict(size=6),
-        )
-
-        fig_line.update_layout(
-            xaxis=dict(title="시간대", tickmode="linear", dtick=1),
-            yaxis=dict(title=y_label),
-            hovermode="x unified",
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-        )
-
-        st.plotly_chart(fig_line, use_container_width=True)
-
-        # 11. 주요 시간대(야간/출퇴근) 비교
-        st.subheader("⏰ 주요 시간대 비교 (야간 vs 출퇴근)")
-
-        night_mask = (hourly_df["시간"] >= 22) | (hourly_df["시간"] <= 6)
-        rush_mask = (hourly_df["시간"].between(7, 9)) | (hourly_df["시간"].between(17, 19))
-
-        night_data = hourly_df[night_mask]
-        rush_data = hourly_df[rush_mask]
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("🌙 **야간 시간대 (22–06시)**")
-            if len(night_data) > 0:
-                fig_night = px.bar(
-                    night_data,
-                    x="시간",
-                    y="값",
-                    color="값",
-                    color_continuous_scale="Reds",
-                    labels={"값": y_label},
-                )
-                fig_night.update_layout(
-                    showlegend=False, xaxis_title="시간대", yaxis_title=y_label
-                )
-                st.plotly_chart(fig_night, use_container_width=True)
+if data_source == "API 실시간 로드":
+    target_month = st.sidebar.text_input("조회 월 (YYYYMM)", value="202401")
+    if st.sidebar.button("데이터 불러오기"):
+        # 서울시 지하철 시간대별 승하차 API URL
+        url = f"http://openAPI.seoul.go.kr:8088/{API_KEY}/json/CardSubwayTime/1/1000/{target_month}"
+        
+        try:
+            res = requests.get(url)
+            data = res.json()
+            
+            if "CardSubwayTime" in data:
+                df = pd.DataFrame(data["CardSubwayTime"]["row"])
+                st.success(f"✅ {target_month} API 데이터 로드 완료!")
             else:
-                st.write("해당 구간 데이터 없음")
-
-        with col2:
-            st.markdown("💼 **출퇴근 시간대 (07–09, 17–19시)**")
-            if len(rush_data) > 0:
-                fig_rush = px.bar(
-                    rush_data,
-                    x="시간",
-                    y="값",
-                    color="값",
-                    color_continuous_scale="Blues",
-                    labels={"값": y_label},
-                )
-                fig_rush.update_layout(
-                    showlegend=False, xaxis_title="시간대", yaxis_title=y_label
-                )
-                st.plotly_chart(fig_rush, use_container_width=True)
-            else:
-                st.write("해당 구간 데이터 없음")
-
-        # 12. 핵심 메트릭 (정규화 여부 상관 없이 비율 개념은 유지)
-        peak_row = hourly_df.loc[hourly_df["값"].idxmax()]
-        night_avg = night_data["값"].mean() if len(night_data) > 0 else 0
-        rush_avg = rush_data["값"].mean() if len(rush_data) > 0 else 0
-        night_ratio = (night_avg / rush_avg * 100) if rush_avg > 0 else 0
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("🏆 피크 시간대", f"{int(peak_row['시간'])}시", f"{peak_row['값']:.3f}")
-        c2.metric("🌙 야간 평균", f"{night_avg:.3f}")
-        c3.metric("💼 출퇴근 평균", f"{rush_avg:.3f}")
-        c4.metric("야간/출퇴근 비율", f"{night_ratio:.0f}%")
-
-        # 13. 상세 테이블
-        st.subheader("📋 시간대별 상세 데이터")
-        st.dataframe(hourly_df.round(3))
+                st.error("❌ API 데이터를 가져오지 못했습니다. 인증키와 날짜를 확인하세요.")
+        except Exception as e:
+            st.error(f"연결 오류: {e}")
 
 else:
-    st.info("👆 서울시 지하철 시간대별 승차 CSV를 업로드해주세요.")
+    uploaded_file = st.sidebar.file_uploader("CSV 파일 업로드", type="csv")
+    if uploaded_file:
+        df = pd.read_csv(uploaded_file, encoding="cp949")
+
+# --- 2. 데이터 처리 및 시각화 ---
+if df is not None:
+    # API 데이터인 경우 컬럼명 매핑 및 타입 변환 필요
+    if "LINE_NUM" in df.columns:
+        # API 영문 컬럼명을 한글/숫자형태로 변환하는 작업
+        time_cols = [col for col in df.columns if "_NUM" in col]
+        df[time_cols] = df[time_cols].apply(pd.to_numeric)
+        line_col = "LINE_NUM"
+        station_col = "SUB_STA_NM"
+    else:
+        # CSV 데이터인 경우 기존 로직 유지
+        line_col = next((col for col in df.columns if "호선" in str(col)), None)
+        time_cols = [col for col in df.columns if re.search(r"\d{2}시-\d{2}시", str(col))]
+        station_col = next((col for col in df.columns if "역명" in str(col)), "역명")
+
+    # 전처리 옵션
+    st.sidebar.header("🧹 전처리 옵션")
+    na_method = st.sidebar.selectbox("결측치 처리", ["0으로 채우기", "평균으로 채우기"])
+    normalize_flag = st.sidebar.checkbox("Min-Max 정규화 적용", value=False)
+
+    work_df = df.copy()
+    # 결측치 처리
+    if na_method == "0으로 채우기":
+        work_df[time_cols] = work_df[time_cols].fillna(0)
+    else:
+        work_df[time_cols] = work_df[time_cols].apply(lambda s: s.fillna(s.mean()))
+
+    # 정규화
+    if normalize_flag:
+        work_df[time_cols] = (work_df[time_cols] - work_df[time_cols].min()) / (work_df[time_cols].max() - work_df[time_cols].min() + 1e-9)
+
+    # 호선 선택 및 필터링
+    lines = sorted(work_df[line_col].unique())
+    selected_line = st.sidebar.selectbox("🚇 호선 선택", lines)
+    line_df = work_df[work_df[line_col] == selected_line]
+
+    # --- 3. 시각화 데이터 가공 ---
+    avg_series = line_df[time_cols].mean()
+    hourly_data = []
+
+    for col in time_cols:
+        # API 컬럼(FOUR_RIDE_NUM) 또는 CSV 컬럼(04시-05시)에서 시간 추출
+        hour_search = re.search(r"(\d{2})", col)
+        if hour_search:
+            h = int(hour_search.group(1))
+        else:
+            # API 영문 컬럼명 처리 (예: FOUR -> 4)
+            mapping = {"FOUR":4,"FIVE":5,"SIX":6,"SEVEN":7,"EIGHT":8,"NINE":9,"TEN":10,"ELEVEN":11,"TWELVE":12,"THIR":13,"FOURT":14,"FIFT":15,"SIXT":16,"SEVENT":17,"EIGHTE":18,"NINETE":19,"TWENTY":20}
+            h = next((v for k, v in mapping.items() if k in col), 0)
+        
+        hourly_data.append({"시간": h, "값": avg_series[col], "유형": "승차" if "RIDE" in col or "승차" in col else "하차"})
+
+    hourly_df = pd.DataFrame(hourly_data).sort_values("시간")
+
+    # --- 4. 그래프 출력 ---
+    st.subheader(f"📈 {selected_line} 이용 패턴 분석")
+    fig = px.line(hourly_df, x="시간", y="값", color="유형", markers=True)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 메트릭 표시
+    peak_val = hourly_df["값"].max()
+    peak_hour = hourly_df.loc[hourly_df["값"].idxmax(), "시간"]
+    
+    c1, c2 = st.columns(2)
+    c1.metric("🏆 피크 시간대", f"{peak_hour}시")
+    c2.metric("📊 평균 이용객", f"{hourly_df['값'].mean():.2f}")
+
+    st.subheader("📋 데이터 상세")
+    st.dataframe(line_df.head())
+
+else:
+    st.info("왼쪽 사이드바에서 API 데이터를 불러오거나 CSV 파일을 업로드해주세요.")
