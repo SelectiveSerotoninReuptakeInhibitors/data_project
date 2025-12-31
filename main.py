@@ -1,68 +1,53 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import requests
 
-# --- 1. 설정 및 인증키 ---
-st.set_page_config(page_title="서울 지하철 분석", layout="wide")
+# --- 1. 설정 ---
+st.set_page_config(page_title="서울 지하철 API 진단", layout="wide")
 API_KEY = "58717a597473616e38347858797067"
 
-st.title("🚇 서울 지하철 API 분석 (에러 방지 버전)")
+st.title("🚇 지하철 API 데이터 구조 확인")
 
-# 사이드바 설정 - 안전하게 2024년 10월을 기본값으로 사용
-st.sidebar.header("📡 데이터 설정")
-target_month = st.sidebar.text_input("조회 월 (YYYYMM)", value="202410")
+# 날짜 설정 (가장 안정적인 2024년 5월로 테스트해보세요)
+st.sidebar.header("📡 설정")
+target_month = st.sidebar.text_input("조회 월 (YYYYMM)", value="202405")
 
-# --- 2. 데이터 로딩 함수 (안전장치 추가) ---
-@st.cache_data(ttl=3600)
-def load_subway_data(api_key, month):
-    # 1~1000번 데이터 호출
-    url = f"http://openAPI.seoul.go.kr:8088/{api_key}/json/CardSubwayTime/1/1000/{month}"
+# --- 2. 데이터 로드 ---
+@st.cache_data
+def load_debug_data(api_key, month):
+    # 주소 형식을 아주 정확하게 다시 맞췄습니다.
+    url = f"http://openAPI.seoul.go.kr:8088/{api_key}/json/CardSubwayTime/1/100/{month}/"
     try:
         res = requests.get(url)
-        data = res.json()
-        
-        # 🟢 정상 데이터인 경우
-        if "CardSubwayTime" in data:
-            return pd.DataFrame(data["CardSubwayTime"]["row"]), "SUCCESS"
-        
-        # 🟡 API 서버에서 보낸 에러 메시지인 경우
-        elif "RESULT" in data:
-            return None, data["RESULT"]["MESSAGE"]
-        
-        return None, "알 수 없는 응답 구조"
+        return res.json()
     except Exception as e:
-        return None, str(e)
+        return {"error": str(e)}
 
-# 데이터 실행
-df_raw, status = load_subway_data(API_KEY, target_month)
+result = load_debug_data(API_KEY, target_month)
 
-# --- 3. 에러 방지 체크 ---
-if df_raw is not None:
-    # 🔍 컬럼명이 있는지 확인하고 진행
-    if "LINE_NUM" in df_raw.columns:
-        st.success(f"✅ {target_month} 데이터를 불러왔습니다.")
-        
-        # 숫자 변환
-        num_cols = [col for col in df_raw.columns if "_NUM" in col]
-        df_raw[num_cols] = df_raw[num_cols].apply(pd.to_numeric)
-
-        # 호선 선택
-        lines = sorted(df_raw["LINE_NUM"].unique())
-        selected_line = st.sidebar.selectbox("호선 선택", lines)
-        line_df = df_raw[df_raw["LINE_NUM"] == selected_line]
-
-        # --- 4. 시각화 (간략화) ---
-        ride_cols = [col for col in df_raw.columns if "_RIDE_NUM" in col]
-        avg_data = line_df[ride_cols].mean().reset_index()
-        avg_data.columns = ['시간대', '인원']
-        
-        fig = px.bar(avg_data, x='시간대', y='인원', title=f"{selected_line} 평균 승차")
-        st.plotly_chart(fig, use_container_width=True)
+# --- 3. 데이터 구조 검사 ---
+if "CardSubwayTime" in result:
+    df = pd.DataFrame(result["CardSubwayTime"]["row"])
+    st.success(f"✅ {target_month} 데이터 수신 성공!")
+    
+    # 🔍 여기서 컬럼명을 강제로 한글화하거나 확인합니다.
+    st.write("### 현재 데이터 컬럼 목록:", df.columns.tolist())
+    
+    # 만약 LINE_NUM이 대문자가 아니거나 다른 이름일 경우를 대비
+    # 실제 API 표준은 'LINE_NUM'입니다.
+    if "LINE_NUM" in df.columns:
+        lines = sorted(df["LINE_NUM"].unique())
+        selected_line = st.selectbox("호선 선택", lines)
+        st.dataframe(df[df["LINE_NUM"] == selected_line])
     else:
-        st.error("데이터 구조에 'LINE_NUM'이 없습니다. 관리자에게 문의하세요.")
+        st.warning("⚠️ 'LINE_NUM' 컬럼이 보이지 않습니다. 아래 '전체 데이터'를 보고 실제 컬럼명을 확인하세요.")
+        st.dataframe(df) # 어떤 컬럼이 들어왔는지 직접 확인
+
+elif "RESULT" in result:
+    st.error(f"❌ API 서버 메시지: {result['RESULT']['MESSAGE']}")
+    st.write("코드:", result['RESULT']['CODE'])
+    st.info("💡 팁: '해당 데이터가 없습니다'라고 나오면 날짜를 202405로 바꿔보세요.")
+
 else:
-    # ❌ 데이터가 없을 때 메시지 출력
-    st.error(f"❌ 데이터를 가져오지 못했습니다: {status}")
-    st.warning("💡 원인: 조회하신 월의 데이터가 아직 서울시 서버에 업로드되지 않았을 가능성이 큽니다.")
-    st.info("해결책: 왼쪽 사이드바에서 날짜를 **202410**으로 입력해 보세요.")
+    st.error("알 수 없는 응답입니다.")
+    st.json(result)
