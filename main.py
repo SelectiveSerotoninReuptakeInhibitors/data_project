@@ -3,71 +3,86 @@ import pandas as pd
 import requests
 import plotly.express as px
 
-st.set_page_config(page_title="서울 지하철 분석", layout="wide")
+st.set_page_config(page_title="서울 지하철 최종 대시보드", layout="wide")
 API_KEY = "58717a597473616e38347858797067"
 
-st.title("🚇 서울 지하철 API 분석 (최종 수정본)")
+st.title("🚇 서울 지하철 실시간 API 분석 완료!")
 
-# 1. 사이드바 설정 (데이터가 확실히 있는 2024년 10월을 기본값으로!)
+# 1. 사이드바 설정
 st.sidebar.header("📡 데이터 설정")
 target_month = st.sidebar.text_input("조회 월 (YYYYMM)", value="202410")
-st.sidebar.warning("⚠️ 최신 월은 데이터가 없을 수 있습니다. '202410'으로 먼저 테스트하세요.")
 
 # 2. 데이터 로드 함수
 @st.cache_data(ttl=3600)
-def load_subway_data(api_key, month):
+def load_final_data(api_key, month):
+    # 주소 끝에 슬래시(/)를 붙여서 더 정확하게 요청합니다.
     url = f"http://openAPI.seoul.go.kr:8088/{api_key}/json/CardSubwayTime/1/1000/{month}/"
     try:
         res = requests.get(url)
         data = res.json()
         
-        # [중요] 'CardSubwayTime' 키가 있는지 확인
         if "CardSubwayTime" in data:
             df = pd.DataFrame(data["CardSubwayTime"]["row"])
+            # [핵심] 모든 컬럼명을 대문자로 바꾸고 양끝 공백을 제거해서 에러 방지
+            df.columns = [c.strip().upper() for c in df.columns]
             return df, "SUCCESS"
         elif "RESULT" in data:
-            return None, f"API 메시지: {data['RESULT']['MESSAGE']} ({data['RESULT']['CODE']})"
+            return None, data["RESULT"]["MESSAGE"]
         else:
-            return None, "알 수 없는 응답 형식입니다."
+            return None, "데이터 구조 이상"
     except Exception as e:
-        return None, f"연결 오류: {str(e)}"
+        return None, str(e)
 
-# 실행
-df, status = load_subway_data(API_KEY, target_month)
+# 실행!
+df, status = load_final_data(API_KEY, target_month)
 
 # 3. 데이터 처리 및 시각화
 if df is not None:
-    # 🔴 여기서 LINE_NUM 존재 여부를 다시 한번 체크합니다.
-    if "LINE_NUM" in df.columns:
-        st.success(f"✅ {target_month} 데이터를 불러왔습니다.")
+    # 🔍 컬럼명 자동 매핑 (LINE_NUM이 없으면 '호선명' 등으로라도 찾음)
+    line_col = next((c for c in df.columns if "LINE" in c or "호선" in c), None)
+    
+    if line_col:
+        st.success(f"✅ {target_month} 데이터 연결 성공! (컬럼명: {line_col})")
         
-        # 숫자 변환
-        num_cols = [col for col in df.columns if "_NUM" in col]
-        df[num_cols] = df[num_cols].apply(pd.to_numeric)
+        # 숫자형 변환 (에러 방지)
+        for col in df.columns:
+            if "NUM" in col or "CNT" in col:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
         # 호선 선택
-        lines = sorted(df["LINE_NUM"].unique())
-        selected_line = st.sidebar.selectbox("호선 선택", lines)
-        line_df = df[df["LINE_NUM"] == selected_line]
+        lines = sorted(df[line_col].unique())
+        selected_line = st.sidebar.selectbox("🚇 분석할 호선 선택", lines)
+        line_df = df[df[line_col] == selected_line]
 
-        # 간단한 그래프 시각화
-        ride_cols = [col for col in df.columns if "_RIDE_NUM" in col]
+        # --- 시간대별 그래프 가공 ---
+        # 승차(RIDE) 컬럼들만 모으기
+        ride_cols = [c for c in df.columns if "RIDE" in c]
         avg_data = line_df[ride_cols].mean().reset_index()
         avg_data.columns = ['시간대', '인원']
         
-        fig = px.bar(avg_data, x='시간대', y='인원', title=f"{selected_line} 시간대별 평균 승차")
+        # 시간대 이름 예쁘게 정리 (예: FOUR_RIDE_NUM -> 04시)
+        time_labels = {
+            'FOUR': '04시', 'FIVE': '05시', 'SIX': '06시', 'SEVEN': '07시', 'EIGHT': '08시',
+            'NINE': '09시', 'TEN': '10시', 'ELEVEN': '11시', 'TWELVE': '12시', 'THIRTEEN': '13시',
+            'FOURTEEN': '14시', 'FIFTEEN': '15시', 'SIXTEEN': '16시', 'SEVENTEEN': '17시',
+            'EIGHTEEN': '18시', 'NINETEEN': '19시', 'TWENTY': '20시', 'TWENTY_ONE': '21시',
+            'TWENTY_TWO': '22시', 'TWENTY_THREE': '23시'
+        }
+        avg_data['시간'] = avg_data['시간대'].apply(lambda x: next((v for k, v in time_labels.items() if k in x), x))
+        avg_data = avg_data.sort_values('시간')
+
+        # 그래프 출력
+        st.subheader(f"📊 {selected_line} 시간대별 이용객 추이")
+        fig = px.line(avg_data, x='시간', y='인원', markers=True, 
+                      color_discrete_sequence=['#FF4B4B'])
         st.plotly_chart(fig, use_container_width=True)
-        
-        st.dataframe(line_df.head())
+
+        # 데이터 표
+        with st.expander("데이터 원본 보기"):
+            st.dataframe(line_df)
     else:
-        # 데이터가 왔지만 LINE_NUM이 없는 특수 상황
-        st.error("데이터 수신은 성공했으나 형식이 올바르지 않습니다.")
-        st.write("불러온 데이터 실제 모습:", df) 
+        st.error("데이터에 호선(LINE) 관련 컬럼을 찾을 수 없습니다.")
+        st.write("불러온 컬럼들:", list(df.columns))
 else:
-    # ❌ 에러 발생 시 안내
-    st.error(f"❌ 데이터를 가져오지 못했습니다.")
-    st.info(f"이유: {status}")
-    st.markdown("---")
-    st.write("### 💡 해결 방법")
-    st.write("1. 왼쪽 사이드바 날짜를 **202410**으로 입력해 보세요.")
-    st.write("2. 만약 '인증키가 유효하지 않습니다'라고 뜨면 30분 뒤에 시도해 보세요.")
+    st.error(f"❌ 실패: {status}")
+    st.info("날짜를 202410으로 입력하셨나요? 최신 달은 데이터가 없을 수 있습니다.")
