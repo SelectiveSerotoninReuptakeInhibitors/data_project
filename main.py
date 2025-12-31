@@ -3,108 +3,66 @@ import pandas as pd
 import plotly.express as px
 import requests
 
-# --- 1. 기본 설정 및 인증키 ---
-st.set_page_config(page_title="서울 지하철 분석 대시보드", layout="wide")
+# --- 1. 설정 및 인증키 ---
+st.set_page_config(page_title="서울 지하철 분석", layout="wide")
 API_KEY = "58717a597473616e38347858797067"
 
-st.title("⏰ 서울 지하철 시간대별 이용 분석 (API 실시간)")
+st.title("🚇 서울 지하철 API 분석 (에러 방지 버전)")
 
-# 사이드바 설정
-st.sidebar.header("📡 조회 설정")
-# 데이터가 확실히 존재하는 달을 기본값으로 설정
+# 사이드바 설정 - 안전하게 2024년 10월을 기본값으로 사용
+st.sidebar.header("📡 데이터 설정")
 target_month = st.sidebar.text_input("조회 월 (YYYYMM)", value="202410")
 
-# --- 2. 데이터 통합 로딩 함수 ---
+# --- 2. 데이터 로딩 함수 (안전장치 추가) ---
 @st.cache_data(ttl=3600)
-def load_all_subway_data(api_key, month):
-    all_rows = []
-    # 데이터가 1000건이 넘으므로 두 번에 나누어 호출 (총 2000건 확보)
-    for start in [1, 1001]:
-        end = start + 999
-        url = f"http://openAPI.seoul.go.kr:8088/{api_key}/json/CardSubwayTime/{start}/{end}/{month}"
-        try:
-            res = requests.get(url)
-            data = res.json()
-            if "CardSubwayTime" in data:
-                all_rows.extend(data["CardSubwayTime"]["row"])
-        except:
-            continue
-    
-    if not all_rows:
-        return None
-    return pd.DataFrame(all_rows)
-
-# 데이터 호출
-df_raw = load_all_subway_data(API_KEY, target_month)
-
-# --- 3. 데이터 전처리 ---
-if df_raw is not None:
-    # 숫자형 변환
-    num_cols = [col for col in df_raw.columns if "_NUM" in col]
-    df_raw[num_cols] = df_raw[num_cols].apply(pd.to_numeric)
-
-    # 호선 선택
-    lines = sorted(df_raw["LINE_NUM"].unique())
-    selected_line = st.sidebar.selectbox("🚇 분석할 호선 선택", lines)
-    line_df = df_raw[df_raw["LINE_NUM"] == selected_line]
-
-    # --- 4. 시간대 데이터 재구성 ---
-    # API 영문 컬럼명 -> 숫자 시간 매핑
-    time_map = {
-        'FOUR': 4, 'FIVE': 5, 'SIX': 6, 'SEVEN': 7, 'EIGHT': 8, 'NINE': 9, 'TEN': 10,
-        'ELEVEN': 11, 'TWELVE': 12, 'THIRTEEN': 13, 'FOURTEEN': 14, 'FIFTEEN': 15,
-        'SIXTEEN': 16, 'SEVENTEEN': 17, 'EIGHTEEN': 18, 'NINETEEN': 19, 'TWENTY': 20,
-        'TWENTY_ONE': 21, 'TWENTY_TWO': 22, 'TWENTY_THREE': 23, 'MIDNIGHT': 0
-    }
-
-    # 승차(RIDE)와 하차(ALIGHT) 데이터 분리 및 집계
-    ride_data = []
-    alight_data = []
-
-    for eng, hour in time_map.items():
-        ride_col = f"{eng}_RIDE_NUM"
-        alight_col = f"{eng}_ALIGHT_NUM"
+def load_subway_data(api_key, month):
+    # 1~1000번 데이터 호출
+    url = f"http://openAPI.seoul.go.kr:8088/{api_key}/json/CardSubwayTime/1/1000/{month}"
+    try:
+        res = requests.get(url)
+        data = res.json()
         
-        if ride_col in line_df.columns:
-            ride_data.append({"시간": hour, "인원": line_df[ride_col].mean(), "구분": "승차"})
-        if alight_col in line_df.columns:
-            alight_data.append({"시간": hour, "인원": line_df[alight_col].mean(), "구분": "하차"})
+        # 🟢 정상 데이터인 경우
+        if "CardSubwayTime" in data:
+            return pd.DataFrame(data["CardSubwayTime"]["row"]), "SUCCESS"
+        
+        # 🟡 API 서버에서 보낸 에러 메시지인 경우
+        elif "RESULT" in data:
+            return None, data["RESULT"]["MESSAGE"]
+        
+        return None, "알 수 없는 응답 구조"
+    except Exception as e:
+        return None, str(e)
 
-    plot_df = pd.concat([pd.DataFrame(ride_data), pd.DataFrame(alight_data)]).sort_values("시간")
+# 데이터 실행
+df_raw, status = load_subway_data(API_KEY, target_month)
 
-    # --- 5. 시각화 영역 ---
-    st.subheader(f"📊 {selected_line} 시간대별 승하차 패턴 ({target_month})")
+# --- 3. 에러 방지 체크 ---
+if df_raw is not None:
+    # 🔍 컬럼명이 있는지 확인하고 진행
+    if "LINE_NUM" in df_raw.columns:
+        st.success(f"✅ {target_month} 데이터를 불러왔습니다.")
+        
+        # 숫자 변환
+        num_cols = [col for col in df_raw.columns if "_NUM" in col]
+        df_raw[num_cols] = df_raw[num_cols].apply(pd.to_numeric)
 
-    # (1) 메인 선 그래프
-    fig_line = px.line(plot_df, x="시간", y="인원", color="구분", markers=True,
-                       title=f"{selected_line} 평균 이용객 추이",
-                       color_discrete_map={"승차": "#FF4B4B", "하차": "#1C83E1"})
-    fig_line.update_layout(xaxis=dict(tickmode="linear", dtick=1))
-    st.plotly_chart(fig_line, use_container_width=True)
+        # 호선 선택
+        lines = sorted(df_raw["LINE_NUM"].unique())
+        selected_line = st.sidebar.selectbox("호선 선택", lines)
+        line_df = df_raw[df_raw["LINE_NUM"] == selected_line]
 
-    # (2) 주요 지표 (Metrics)
-    col1, col2, col3 = st.columns(3)
-    peak_ride = plot_df[plot_df["구분"]=="승차"].loc[plot_df[plot_df["구분"]=="승차"]["인원"].idxmax()]
-    col1.metric("🏆 최대 승차 시간", f"{int(peak_ride['시간'])}시", f"{int(peak_ride['인원'])}명")
-    
-    total_stations = len(line_df)
-    col2.metric("🚉 분석 역 개수", f"{total_stations}개 역")
-    
-    avg_daily = plot_df["인원"].mean()
-    col3.metric("👥 시간대별 평균 이용", f"{int(avg_daily)}명")
-
-    # (3) 역별 비교 (Top 10)
-    st.subheader(f"🔝 {selected_line} 이용객 상위 10개 역")
-    line_df['총이용객'] = line_df[num_cols].sum(axis=1)
-    top10 = line_df.nlargest(10, '총이용객')
-    fig_bar = px.bar(top10, x="SUB_STA_NM", y="총이용객", color="총이용객",
-                     labels={"SUB_STA_NM": "역 이름", "총이용객": "전체 이용객 수"})
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-    # (4) 상세 데이터
-    with st.expander("📄 전체 데이터 표 보기"):
-        st.dataframe(line_df)
-
+        # --- 4. 시각화 (간략화) ---
+        ride_cols = [col for col in df_raw.columns if "_RIDE_NUM" in col]
+        avg_data = line_df[ride_cols].mean().reset_index()
+        avg_data.columns = ['시간대', '인원']
+        
+        fig = px.bar(avg_data, x='시간대', y='인원', title=f"{selected_line} 평균 승차")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error("데이터 구조에 'LINE_NUM'이 없습니다. 관리자에게 문의하세요.")
 else:
-    st.error("데이터를 불러오지 못했습니다. 날짜(YYYYMM)를 확인해주세요.")
-    st.info("💡 팁: 공공데이터는 확정까지 시간이 걸립니다. 202410이나 202409를 입력해보세요.")
+    # ❌ 데이터가 없을 때 메시지 출력
+    st.error(f"❌ 데이터를 가져오지 못했습니다: {status}")
+    st.warning("💡 원인: 조회하신 월의 데이터가 아직 서울시 서버에 업로드되지 않았을 가능성이 큽니다.")
+    st.info("해결책: 왼쪽 사이드바에서 날짜를 **202410**으로 입력해 보세요.")
