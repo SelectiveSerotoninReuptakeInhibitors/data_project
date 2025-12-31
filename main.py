@@ -4,69 +4,84 @@ import requests
 import plotly.express as px
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="서울 지하철 분석기", layout="wide")
+st.set_page_config(page_title="서울 지하철 비교 분석기", layout="wide")
 API_KEY = "58717a597473616e38347858797067"
 
-st.title("🚇 최신 데이터 무한 추적 분석기")
+st.title("🚇 지하철 데이터 분석 & 호선별 비교")
 
-# --- 1. 데이터가 나올 때까지 과거로 거슬러 올라가는 함수 ---
+# 1. 데이터 로드 (최신 달 자동 탐색)
 @st.cache_data(ttl=3600)
-def find_latest_data(api_key):
-    # 오늘부터 최대 12개월 전까지 뒤집니다.
+def get_data():
     for i in range(1, 13):
         target_date = datetime.now() - timedelta(days=30 * i)
         month_str = target_date.strftime("%Y%m")
-        
-        # API 주소 (가장 표준적인 형식)
-        url = f"http://openAPI.seoul.go.kr:8088/{api_key}/json/CardSubwayTime/1/1000/{month_str}"
-        
+        url = f"http://openAPI.seoul.go.kr:8088/{API_KEY}/json/CardSubwayTime/1/1000/{month_str}"
         try:
             res = requests.get(url)
             data = res.json()
-            
-            # 성공적으로 데이터를 찾았을 때만 리턴
             if "CardSubwayTime" in data:
                 return pd.DataFrame(data["CardSubwayTime"]["row"]), month_str
-        except:
-            continue
+        except: continue
     return None, None
 
-with st.spinner('서버에서 가장 최신 데이터를 찾는 중...'):
-    df, found_month = find_latest_data(API_KEY)
+df_raw, found_month = get_data()
 
-# --- 2. 데이터 분석 ---
-if df is not None:
-    st.success(f"🎊 드디어 찾았습니다! 현재 조회 가능한 최신 달: **{found_month}**")
-    
-    # 모든 컬럼명에서 공백을 제거하고 대문자로 변환 (철저하게!)
-    df.columns = [str(c).strip().upper() for c in df.columns]
-    
-    # LINE_NUM이 없으면 '호선명' 또는 첫 번째 컬럼을 강제로 사용
-    line_col = "LINE_NUM" if "LINE_NUM" in df.columns else df.columns[1]
-    
-    if line_col in df.columns:
-        lines = sorted(df[line_col].unique())
-        selected_line = st.sidebar.selectbox("🚇 호선 선택", lines)
-        line_df = df[df[line_col] == selected_line]
+if df_raw is not None:
+    # 컬럼 정리
+    df_raw.columns = [c.strip().upper() for c in df_raw.columns]
+    st.success(f"✅ {found_month} 데이터 분석 중")
 
-        # 숫자 변환
-        num_cols = [c for c in df.columns if "NUM" in c]
-        line_df[num_cols] = line_df[num_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
+    # 호선 컬럼 찾기
+    line_col = "LINE_NUM" if "LINE_NUM" in df_raw.columns else df_raw.columns[1]
+    
+    # --- [수치 보정 로직] ---
+    # 모든 숫자형 컬럼(RIDE, ALIGHT 포함)을 강제로 숫자로 변환
+    num_cols = [c for c in df_raw.columns if "NUM" in c or "CNT" in c or "인원" in c]
+    for col in num_cols:
+        df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0)
 
-        # 시간대별 승차 차트 가공
-        ride_cols = [c for c in num_cols if "RIDE" in c]
-        avg_ride = line_df[ride_cols].mean().reset_index()
-        avg_ride.columns = ['시간대', '인원']
+    # --- 기능 1: 개별 호선 상세 분석 ---
+    lines = sorted(df_raw[line_col].unique())
+    selected_line = st.sidebar.selectbox("🔍 상세 분석할 호선", lines, index=lines.index("2호선") if "2호선" in lines else 0)
+    
+    line_df = df_raw[df_raw[line_col] == selected_line]
+    ride_cols = [c for c in num_cols if "RIDE" in c or "승차" in c]
+    
+    # 시간대별 평균 계산 (수치가 안 나올 수 없게 강제 계산)
+    avg_ride = line_df[ride_cols].mean().reset_index()
+    avg_ride.columns = ['시간대', '인원']
+    # 시간대 이름 간소화 (04시_승차인원 -> 04시)
+    avg_ride['시간'] = avg_ride['시간대'].apply(lambda x: x.split('_')[0] if '_' in x else x[:2])
+
+    st.subheader(f"📊 {selected_line} 시간대별 이용객 현황")
+    fig1 = px.bar(avg_ride, x='시간', y='인원', color='인원', color_continuous_scale='Blues')
+    st.plotly_chart(fig1, use_container_width=True)
+
+    st.markdown("---")
+
+    # --- 기능 2: [요청하신] 호선 비교 (1호선 vs 2호선) ---
+    st.subheader("⚔️ 호선별 승객 수 비교 (1호선 vs 2호선)")
+    
+    # 비교할 호선 선택 (기본값 1호선, 2호선)
+    comp_lines = st.multiselect("비교할 호선들을 선택하세요", lines, default=[l for l in ["1호선", "2호선"] if l in lines])
+    
+    if comp_lines:
+        compare_df = df_raw[df_raw[line_col].isin(comp_lines)]
+        # 호선별 전체 승객 합계 계산
+        comp_result = compare_df.groupby(line_col)[ride_cols].sum().sum(axis=1).reset_index()
+        comp_result.columns = ['호선', '총 승객 수']
         
-        # 차트 출력
-        st.subheader(f"📊 {selected_line} 시간대별 이용객 (평균)")
-        fig = px.line(avg_ride, x='시간대', y='인원', markers=True)
-        st.plotly_chart(fig, use_container_width=True)
+        fig2 = px.pie(comp_result, names='호선', values='총 승객 수', 
+                      title="선택 호선별 전체 승객 비중",
+                      hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
         
-        st.dataframe(line_df.head())
-    else:
-        st.error("데이터 형태가 평소와 다릅니다. 아래 원본을 확인해주세요.")
-        st.write(df)
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.plotly_chart(fig2, use_container_width=True)
+        with c2:
+            st.write("#### 📈 수치 비교")
+            for idx, row in comp_result.iterrows():
+                st.metric(f"{row['호선']} 총 승객", f"{int(row['총 승객 수']):,} 명")
+    
 else:
-    st.error("❌ 모든 시도 실패: 데이터가 하나도 없습니다. API 키를 다시 확인해주세요.")
-    st.write(f"현재 시도한 키: {API_KEY}")
+    st.error("데이터를 가져오는 데 실패했습니다. API 키나 인터넷 연결을 확인해주세요.")
